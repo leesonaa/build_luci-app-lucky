@@ -1,0 +1,148 @@
+name: Build luci-app-lucky (ImmortalWrt 25.12)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build [${{ matrix.arch }}]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ARCH=x86_64 → lucky Linux_x86_64
+          - arch: x86_64
+            sdk_url: https://downloads.immortalwrt.org/releases/25.12.0-rc1/targets/x86/64/immortalwrt-sdk-25.12.0-rc1-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+
+          # ARCH=i386 → lucky Linux_i386
+          - arch: x86_generic
+            sdk_url: https://downloads.immortalwrt.org/releases/25.12.0-rc1/targets/x86/generic/immortalwrt-sdk-25.12.0-rc1-x86-generic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+
+          # ARCH=aarch64 → lucky Linux_arm64
+          - arch: mediatek_filogic
+            sdk_url: https://downloads.immortalwrt.org/releases/25.12.0-rc1/targets/mediatek/filogic/immortalwrt-sdk-25.12.0-rc1-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+
+          # ARCH=arm → lucky Linux_armv7
+          - arch: ipq40xx_generic
+            sdk_url: https://downloads.immortalwrt.org/releases/25.12.0-rc1/targets/ipq40xx/generic/immortalwrt-sdk-25.12.0-rc1-ipq40xx-generic_gcc-14.3.0_musl_eabi.Linux-x86_64.tar.zst
+
+          # ARCH=mipsel → lucky Linux_mipsle_softfloat
+          - arch: ramips_mt7621
+            sdk_url: https://downloads.immortalwrt.org/releases/25.12.0-rc1/targets/ramips/mt7621/immortalwrt-sdk-25.12.0-rc1-ramips-mt7621_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+
+          # ARCH=mips → lucky Linux_mips_softfloat
+          - arch: ath79_generic
+            sdk_url: https://downloads.immortalwrt.org/releases/25.12.0-rc1/targets/ath79/generic/immortalwrt-sdk-25.12.0-rc1-ath79-generic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+            g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5 \
+            libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm lrzsz mkisofs msmtp \
+            nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pip python3-ply \
+            python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig \
+            texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+
+      - name: Download ImmortalWrt SDK
+        run: |
+          wget -q "${{ matrix.sdk_url }}" -O sdk.tar.zst
+
+      - name: Extract SDK
+        run: |
+          tar --zstd -xf sdk.tar.zst
+          echo "SDK_DIR=$(ls -d immortalwrt-sdk-*/)" >> $GITHUB_ENV
+
+      - name: Update & install feeds
+        run: |
+          cd "${{ env.SDK_DIR }}"
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Clone luci-app-lucky
+        run: |
+          cd "${{ env.SDK_DIR }}/package"
+          git clone https://github.com/gdy666/luci-app-lucky.git
+
+      - name: Generate default config
+        run: |
+          cd "${{ env.SDK_DIR }}"
+          make defconfig
+
+      - name: Compile lucky (binary)
+        run: |
+          cd "${{ env.SDK_DIR }}"
+          make package/luci-app-lucky/lucky/compile V=s -j$(nproc)
+
+      - name: Compile luci-app-lucky (UI)
+        run: |
+          cd "${{ env.SDK_DIR }}"
+          make package/luci-app-lucky/luci-app-lucky/compile V=s -j$(nproc)
+
+      - name: Collect APK artifacts
+        run: |
+          mkdir -p artifacts
+          cd "${{ env.SDK_DIR }}"
+          find bin/packages/*/base/ -name "*lucky*.apk" -exec cp {} ../artifacts/ \;
+          echo "Built packages:"
+          ls -lh ../artifacts/
+
+      - name: Upload APKs as job artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucky-apk-${{ matrix.arch }}
+          path: artifacts/*.apk
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-apks
+          pattern: lucky-apk-*
+          merge-multiple: true
+
+      - name: List collected APKs
+        run: |
+          echo "All APKs to be released:"
+          find all-apks/ -name "*.apk" | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || 'latest' }}
+          name: "luci-app-lucky ImmortalWrt 25.12 ${{ github.ref_name || '' }}"
+          body: |
+            ## luci-app-lucky for ImmortalWrt 25.12.0-rc1
+
+            | SDK Target | ARCH | lucky 二进制 | 适用设备 |
+            |---|---|---|---|
+            | x86/64 | x86_64 | Linux_x86_64 | 软路由、虚拟机 |
+            | x86/generic | i386 | Linux_i386 | x86 32位 |
+            | mediatek/filogic | aarch64 | Linux_arm64 | 联发科 ARM64 路由 |
+            | ipq40xx/generic | arm | Linux_armv7 | 高通 IPQ40xx ARM 路由 |
+            | ramips/mt7621 | mipsel | Linux_mipsle_softfloat | 联发科 MT7621 路由 |
+            | ath79/generic | mips | Linux_mips_softfloat | AR9xxx MIPS 路由 |
+
+            ### Installation
+            ```sh
+            apk add --allow-untrusted lucky_*.apk
+            apk add --allow-untrusted luci-app-lucky_*.apk
+            ```
+          files: all-apks/*.apk
+          draft: false
+          prerelease: false
